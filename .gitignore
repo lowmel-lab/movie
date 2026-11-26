@@ -1,4 +1,9 @@
 /input/
 /output/
+/.movie-cache/
+/assets/bgm/
+/assets/sfx/
+/assets/fonts/
+/assets/transitions/
 __pycache__/
 .DS_Store

@@ -33,8 +33,8 @@ class Clip:
     frame_rate: Fraction
 
 
-def run(*args):
-    result = subprocess.run(args, capture_output=True, text=True, errors="replace")
+def run(*args, cwd=None):
+    result = subprocess.run(args, capture_output=True, text=True, errors="replace", cwd=cwd)
     if result.returncode:
         raise ValueError(result.stderr.strip() or f"{args[0]} の実行に失敗しました")
     return result
@@ -126,22 +126,27 @@ def kept_ranges(clip, keep_pauses):
     return ranges or whole_clip
 
 
-def filter_graph(clips, ranges):
+def filter_graph(clips, ranges, *, narration_target=-16, frame_aligned=False):
     canvas = clips[0]
     frame_rate = canvas.frame_rate
     video_format = (
         "scale='max(2,trunc(iw*if(gt(sar,0),sar,1)/2)*2)':ih,setsar=1,"
         f"scale={canvas.width}:{canvas.height}:force_original_aspect_ratio=decrease:"
         f"force_divisible_by=2,pad={canvas.width}:{canvas.height}:(ow-iw)/2:(oh-ih)/2,"
-        f"setsar=1,fps={frame_rate},format=yuv420p"
+        "setsar=1,format=yuv420p"
     )
+    if not frame_aligned:
+        video_format += f",fps={frame_rate}"
     filters = []
     segments = []
     for index, (clip, clip_ranges) in enumerate(zip(clips, ranges)):
         count = len(clip_ranges)
         video_sources = [f"[video_source_{index}_{part}]" for part in range(count)]
         audio_sources = [f"[audio_source_{index}_{part}]" for part in range(count)]
-        filters.append(f"[{index}:{clip.video_index}]split={count}{''.join(video_sources)}")
+        video_input = f"[{index}:{clip.video_index}]"
+        if frame_aligned:
+            video_input += f"fps={frame_rate}:start_time=0,"
+        filters.append(f"{video_input}split={count}{''.join(video_sources)}")
         if clip.audio_index is None:
             audio = "anullsrc=r=48000:cl=stereo"
         else:
@@ -152,20 +157,26 @@ def filter_graph(clips, ranges):
         for (start, end), video, audio in zip(clip_ranges, video_sources, audio_sources):
             number = len(segments)
             window = f"start={start:.6f}:end={end:.6f}"
-            filters.append(f"{video}trim={window},"
+            video_window = window
+            if frame_aligned:
+                video_window = (f"start_frame={round(start * frame_rate)}:"
+                                f"end_frame={round(end * frame_rate)}")
+            filters.append(f"{video}trim={video_window},"
                            f"setpts=PTS-STARTPTS,{video_format}[v{number}]")
             filters.append(f"{audio}atrim={window},asetpts=PTS-STARTPTS[a{number}]")
             segments.append(f"[v{number}][a{number}]")
     filters.append(f"{''.join(segments)}concat=n={len(segments)}:v=1:a=1[video][joined]")
-    filters.append("[joined]loudnorm=I=-16:TP=-1.5:LRA=11[audio]")
+    filters.append(f"[joined]loudnorm=I={narration_target}:TP=-1.5:LRA=11[audio]")
     return ";\n".join(filters)
 
 
-def render(clips, ranges, output):
+def render(clips, ranges, output, *, narration_target=-16, frame_aligned=False):
     output.parent.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(prefix=".movie-", dir=output.parent) as temp:
         graph_file = Path(temp) / "filters.txt"
-        graph_file.write_text(filter_graph(clips, ranges), encoding="utf-8")
+        graph = filter_graph(clips, ranges, narration_target=narration_target,
+                             frame_aligned=frame_aligned)
+        graph_file.write_text(graph, encoding="utf-8")
         draft = Path(temp) / "draft.mp4"
         inputs = []
         for clip in clips:
